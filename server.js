@@ -273,10 +273,26 @@ async function startWhatsAppBot() {
         }
 
         // Handle WhatsApp LID privacy IDs if remoteJid is @lid
-        const actualJid = (rawJid && rawJid.includes('@lid'))
-          ? (msg.key.remoteJidAlt || msg.key.participant || msg.key.participantPn || rawJid)
-          : rawJid;
-        const senderPhone = extractPhone(actualJid) || (isSelfChat ? botPhone : '');
+        let resolvedPhone = '';
+        if (rawJid.endsWith('@s.whatsapp.net')) {
+          resolvedPhone = extractPhone(rawJid);
+        } else {
+          if (msg.key.remoteJidAlt && msg.key.remoteJidAlt.endsWith('@s.whatsapp.net')) {
+            resolvedPhone = extractPhone(msg.key.remoteJidAlt);
+          } else if (msg.key.participantPn && msg.key.participantPn.endsWith('@s.whatsapp.net')) {
+            resolvedPhone = extractPhone(msg.key.participantPn);
+          } else if (msg.key.senderPn && msg.key.senderPn.endsWith('@s.whatsapp.net')) {
+            resolvedPhone = extractPhone(msg.key.senderPn);
+          }
+          if (!resolvedPhone && sock.signalRepository?.lidMapping?.getPNForLID) {
+            try {
+              const pn = await sock.signalRepository.lidMapping.getPNForLID(rawJid);
+              if (pn) resolvedPhone = extractPhone(pn);
+            } catch (e) {}
+          }
+        }
+
+        const senderPhone = resolvedPhone || (isSelfChat ? botPhone : extractPhone(rawJid));
 
         logEvent('📩', `Incoming from ${senderPhone || rawJid}: "${text.slice(0, 60)}"`);
 
@@ -288,6 +304,8 @@ async function startWhatsAppBot() {
             body: JSON.stringify({
               action: 'WHATSAPP_BOT',
               sender: senderPhone,
+              senderJid: rawJid,
+              jid: rawJid,
               message: text,
               sendReply: false
             })
@@ -295,14 +313,13 @@ async function startWhatsAppBot() {
 
           const data = await fetchRes.json();
           if (data && data.reply) {
-            logEvent('📤', `Sending reply to ${senderPhone || rawJid}: "${data.reply.slice(0, 45)}..."`);
-            const replyJid = (rawJid && rawJid.includes('@s.whatsapp.net')) 
-              ? rawJid 
-              : (senderPhone ? formatJid(senderPhone) : rawJid);
+            logEvent('📤', `Sending reply to ${rawJid}: "${data.reply.slice(0, 45)}..."`);
+            // THE CRITICAL FIX: Replying to an incoming chat MUST always go directly to rawJid (msg.key.remoteJid)!
+            const replyJid = rawJid;
             await sock.sendMessage(replyJid, { text: data.reply });
-            logEvent('✅', `Delivered reply to ${senderPhone || rawJid}`);
+            logEvent('✅', `Delivered reply to ${rawJid} (${senderPhone || 'LID'})`);
           } else {
-            logEvent('⚠️', `GAS Webhook did not return a reply for ${senderPhone}`);
+            logEvent('⚠️', `GAS Webhook did not return a reply for ${senderPhone || rawJid}`);
           }
         } catch (err) {
           logEvent('❌', `Error forwarding to Google Apps Script: ${err.message}`);
@@ -537,7 +554,7 @@ app.post('/send', async (req, res) => {
   recentSentLog.set(dedupKey, Date.now());
 
   try {
-    const jid = formatJid(phone);
+    const jid = (typeof phone === 'string' && phone.includes('@')) ? phone : formatJid(phone);
     await sock.sendMessage(jid, { text: message });
     logEvent('📤', `Single message delivered to ${phone}`);
     res.json({ status: 'success', message: 'Message sent successfully.' });
