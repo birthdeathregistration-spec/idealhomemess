@@ -84,6 +84,26 @@ function extractMessageText(msg) {
 }
 
 // ===== CLOUD SESSION PERSISTENCE (Free Render Disk Wipe Protection) =====
+// Pre-cache LID mappings for all registered boarders from Google Sheets
+async function syncBoarderLids() {
+  try {
+    const res = await fetch(SCRIPT_URL + '?action=get_initial_data');
+    const d = await res.json();
+    const boarders = d.boarders || [];
+    const pnList = [];
+    boarders.slice(1).forEach(b => {
+      const p = String(b[7] || '').replace(/\D/g, '');
+      if (p.length >= 10) pnList.push(formatJid(p));
+    });
+    if (pnList.length > 0 && sock?.signalRepository?.lidMapping?.getLIDsForPNs) {
+      const lids = await sock.signalRepository.lidMapping.getLIDsForPNs(pnList);
+      logEvent('👥', `Pre-cached LID mappings for ${Object.keys(lids || {}).length} boarders`);
+    }
+  } catch (e) {
+    console.error('LID sync error:', e.message);
+  }
+}
+
 // Synchronizes auth credentials with Google Apps Script so restarts never lose the WhatsApp login
 async function syncAuthFromCloud() {
   try {
@@ -215,6 +235,7 @@ async function startWhatsAppBot() {
         botUser = sock.user;
         console.log('✅ WhatsApp connected successfully as:', botUser?.id || botUser?.name);
         scheduleCloudBackup(1000);
+        setTimeout(syncBoarderLids, 3000);
       }
 
       if (connection === 'close') {
@@ -293,8 +314,9 @@ async function startWhatsAppBot() {
         }
 
         const senderPhone = resolvedPhone || (isSelfChat ? botPhone : extractPhone(rawJid));
+        const pushName = msg.pushName || '';
 
-        logEvent('📩', `Incoming from ${senderPhone || rawJid}: "${text.slice(0, 60)}"`);
+        logEvent('📩', `Incoming from ${pushName ? pushName + ' (' : ''}${senderPhone || rawJid}${pushName ? ')' : ''}: "${text.slice(0, 60)}"`);
 
         // Forward to Google Apps Script Webhook
         try {
@@ -305,6 +327,7 @@ async function startWhatsAppBot() {
               action: 'WHATSAPP_BOT',
               sender: senderPhone,
               senderJid: rawJid,
+              pushName: pushName,
               jid: rawJid,
               message: text,
               sendReply: false
