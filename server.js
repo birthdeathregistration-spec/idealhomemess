@@ -313,11 +313,34 @@ async function startWhatsAppBot() {
 
           const data = await fetchRes.json();
           if (data && data.reply) {
-            logEvent('📤', `Sending reply to ${rawJid}: "${data.reply.slice(0, 45)}..."`);
-            // THE CRITICAL FIX: Replying to an incoming chat MUST always go directly to rawJid (msg.key.remoteJid)!
-            const replyJid = rawJid;
-            await sock.sendMessage(replyJid, { text: data.reply });
-            logEvent('✅', `Delivered reply to ${rawJid} (${senderPhone || 'LID'})`);
+            // Priority 1: If real phone number is known (from GAS boarder match or Baileys alt key), send to standard phone JID
+            const cleanPhone = (data.phone || resolvedPhone || extractPhone(msg.key?.remoteJidAlt) || extractPhone(msg.senderPn) || '').replace(/\D/g, '');
+            const replyJid = (cleanPhone.length >= 10 && (cleanPhone.startsWith('01') || cleanPhone.startsWith('8801')))
+              ? formatJid(cleanPhone)
+              : rawJid;
+
+            logEvent('📤', `Sending reply to ${replyJid}: "${data.reply.slice(0, 45)}..."`);
+
+            try {
+              await Promise.race([
+                sock.sendMessage(replyJid, { text: data.reply }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Send timeout (8s)')), 8000))
+              ]);
+              logEvent('✅', `Delivered reply to ${replyJid}`);
+            } catch (sendErr) {
+              logEvent('⚠️', `Direct send failed (${sendErr.message}), trying fallback`);
+              try {
+                if (replyJid !== rawJid) {
+                  await sock.sendMessage(rawJid, { text: data.reply });
+                  logEvent('✅', `Delivered reply via fallback to ${rawJid}`);
+                } else if (cleanPhone) {
+                  await sock.sendMessage(formatJid(cleanPhone), { text: data.reply });
+                  logEvent('✅', `Delivered reply via fallback to ${cleanPhone}`);
+                }
+              } catch (e2) {
+                logEvent('❌', `Fallback send failed: ${e2.message}`);
+              }
+            }
           } else {
             logEvent('⚠️', `GAS Webhook did not return a reply for ${senderPhone || rawJid}`);
           }
