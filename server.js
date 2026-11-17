@@ -364,7 +364,7 @@ async function startWhatsAppBot() {
           });
 
           const data = await fetchRes.json();
-          if (data && data.reply) {
+          if (data && data.reply && String(data.reply).trim() !== '') {
             // Priority 1: If real phone number is known (from GAS boarder match or Baileys alt key), send to standard phone JID
             const cleanPhone = (data.phone || resolvedPhone || extractPhone(msg.key?.remoteJidAlt) || extractPhone(msg.senderPn) || '').replace(/\D/g, '');
             const replyJid = (cleanPhone.length >= 10 && (cleanPhone.startsWith('01') || cleanPhone.startsWith('8801')))
@@ -397,7 +397,7 @@ async function startWhatsAppBot() {
               }
             }
           } else {
-            logEvent('⚠️', `GAS Webhook did not return a reply for ${senderPhone || rawJid}`);
+            logEvent('🔇', `No reply sent for ${senderPhone || rawJid} (Not a registered boarder in Google Sheet).`);
           }
         } catch (err) {
           logEvent('❌', `Error forwarding to Google Apps Script: ${err.message}`);
