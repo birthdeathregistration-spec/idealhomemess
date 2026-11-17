@@ -220,21 +220,7 @@ async function startWhatsAppBot() {
     // 2. Restore session from Google Sheets if disk is empty
     await syncAuthFromCloud();
 
-    let { state, saveCreds } = await useMultiFileAuthState(authDir);
-
-    // Auto-detect revoked / unregistered session (caused by previous conflict loops)
-    if (state.creds && state.creds.me && state.creds.registered === false) {
-      console.warn('⚠️ Detected revoked WhatsApp session (registered=false). Wiping corrupted credentials...');
-      logEvent('⚠️', 'Detected revoked WhatsApp session (registered=false). Wiping corrupted credentials to prompt fresh QR...');
-      await clearCloudAuth();
-      try {
-        fs.rmSync(authDir, { recursive: true, force: true });
-      } catch (e) {}
-      fs.mkdirSync(authDir, { recursive: true });
-      const freshAuth = await useMultiFileAuthState(authDir);
-      state = freshAuth.state;
-      saveCreds = freshAuth.saveCreds;
-    }
+    const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
     const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
 
@@ -276,6 +262,7 @@ async function startWhatsAppBot() {
         isConnected = true;
         currentQR = null;
         botUser = sock.user;
+        logEvent('✅', `WhatsApp connected successfully as: ${botUser?.id || botUser?.name}`);
         console.log('✅ WhatsApp connected successfully as:', botUser?.id || botUser?.name);
         scheduleCloudBackup(1000);
         setTimeout(syncBoarderLids, 3000);
@@ -287,10 +274,8 @@ async function startWhatsAppBot() {
         const isLoggedOut = statusCode === DisconnectReason.loggedOut;
         console.log('⚠️ Connection closed due to:', lastDisconnect?.error?.message || lastDisconnect?.error, 'Status Code:', statusCode);
 
-        // If explicitly logged out OR if connection fails 4 times in a row (corrupted/stale session):
-        reconnectAttempts++;
-        if (isLoggedOut || reconnectAttempts >= 4) {
-          console.log(`❌ ${isLoggedOut ? 'Logged out from device' : 'Reconnection failed 4 times'}. Clearing stale session to generate fresh QR...`);
+        if (isLoggedOut) {
+          logEvent('❌', 'Logged out from device. Session cleared for fresh QR.');
           reconnectAttempts = 0;
           await clearCloudAuth();
           try {
@@ -298,8 +283,9 @@ async function startWhatsAppBot() {
           } catch (e) {}
           setTimeout(startWhatsAppBot, 2000);
         } else {
-          const delay = Math.min(reconnectAttempts * 3000, 12000);
-          console.log(`⏳ Reconnecting in ${delay / 1000}s (Attempt ${reconnectAttempts}/4)...`);
+          reconnectAttempts++;
+          const delay = Math.min(reconnectAttempts * 3000, 15000);
+          console.log(`⏳ Reconnecting in ${delay / 1000}s (Attempt ${reconnectAttempts})...`);
           setTimeout(startWhatsAppBot, delay);
         }
       }
@@ -511,6 +497,20 @@ app.get('/', (req, res) => {
         </a>
       </div>
     </div>
+
+    <script>
+      let lastQR = '${currentQR || ''}';
+      let isConn = ${isConnected ? 'true' : 'false'};
+      setInterval(async () => {
+        try {
+          const res = await fetch('/status?t=' + Date.now(), { cache: 'no-store' });
+          const data = await res.json();
+          if (data.connected !== isConn || (data.qr && data.qr !== lastQR)) {
+            location.reload();
+          }
+        } catch(e) {}
+      }, 2500);
+    </script>
   </body>
   </html>
   `;
