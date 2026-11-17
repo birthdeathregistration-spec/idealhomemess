@@ -28,6 +28,17 @@ let backupTimeout = null;
 let reconnectAttempts = 0;
 let isStarting = false;
 
+// In-Memory Sent Message Store for E2EE Retry Decryption (Fixes 'Waiting for this message')
+const msgRetryMap = new Map();
+function storeSentMessage(id, message) {
+  if (!id || !message) return;
+  msgRetryMap.set(id, message);
+  if (msgRetryMap.size > 500) {
+    const firstKey = msgRetryMap.keys().next().value;
+    msgRetryMap.delete(firstKey);
+  }
+}
+
 // In-Memory Live Log Buffer for Web Dashboard & Debugging
 const logBuffer = [];
 function logEvent(emoji, message) {
@@ -211,7 +222,15 @@ async function startWhatsAppBot() {
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 0,
       keepAliveIntervalMs: 25000,
-      syncFullHistory: false
+      syncFullHistory: false,
+      markOnlineOnConnect: true,
+      generateHighQualityLinkPreview: false,
+      getMessage: async (key) => {
+        if (key && key.id && msgRetryMap.has(key.id)) {
+          return msgRetryMap.get(key.id);
+        }
+        return { conversation: '' };
+      }
     });
 
     sock.ev.on('creds.update', async () => {
@@ -345,10 +364,11 @@ async function startWhatsAppBot() {
             logEvent('📤', `Sending reply to ${replyJid}: "${data.reply.slice(0, 45)}..."`);
 
             try {
-              await Promise.race([
+              const sent = await Promise.race([
                 sock.sendMessage(replyJid, { text: data.reply }),
                 new Promise((_, reject) => setTimeout(() => reject(new Error('Send timeout (8s)')), 8000))
               ]);
+              if (sent?.key?.id && sent?.message) storeSentMessage(sent.key.id, sent.message);
               logEvent('✅', `Delivered reply to ${replyJid}`);
             } catch (sendErr) {
               logEvent('⚠️', `Direct send failed (${sendErr.message}), trying fallback`);
@@ -601,7 +621,8 @@ app.post('/send', async (req, res) => {
 
   try {
     const jid = (typeof phone === 'string' && phone.includes('@')) ? phone : formatJid(phone);
-    await sock.sendMessage(jid, { text: message });
+    const sent = await sock.sendMessage(jid, { text: message });
+    if (sent?.key?.id && sent?.message) storeSentMessage(sent.key.id, sent.message);
     logEvent('📤', `Single message delivered to ${phone}`);
     res.json({ status: 'success', message: 'Message sent successfully.' });
   } catch (err) {
