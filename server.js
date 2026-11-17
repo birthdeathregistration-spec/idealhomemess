@@ -9,7 +9,8 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion
+  fetchLatestBaileysVersion,
+  Browsers
 } = require('@whiskeysockets/baileys');
 
 const app = express();
@@ -211,14 +212,29 @@ async function startWhatsAppBot() {
     // 2. Restore session from Google Sheets if disk is empty
     await syncAuthFromCloud();
 
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+    let { state, saveCreds } = await useMultiFileAuthState(authDir);
+
+    // Auto-detect revoked / unregistered session (caused by previous conflict loops)
+    if (state.creds && state.creds.me && state.creds.registered === false) {
+      console.warn('⚠️ Detected revoked WhatsApp session (registered=false). Wiping corrupted credentials...');
+      logEvent('⚠️', 'Detected revoked WhatsApp session (registered=false). Wiping corrupted credentials to prompt fresh QR...');
+      await clearCloudAuth();
+      try {
+        fs.rmSync(authDir, { recursive: true, force: true });
+      } catch (e) {}
+      fs.mkdirSync(authDir, { recursive: true });
+      const freshAuth = await useMultiFileAuthState(authDir);
+      state = freshAuth.state;
+      saveCreds = freshAuth.saveCreds;
+    }
+
     const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
 
     sock = makeWASocket({
       version,
       auth: state,
       logger: pino({ level: 'silent' }),
-      browser: ['Ubuntu', 'Chrome', '20.0.04'],
+      browser: Browsers ? Browsers.ubuntu('Chrome') : ['Ubuntu', 'Chrome', '20.0.04'],
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 0,
       keepAliveIntervalMs: 25000,
@@ -229,7 +245,7 @@ async function startWhatsAppBot() {
         if (key && key.id && msgRetryMap.has(key.id)) {
           return msgRetryMap.get(key.id);
         }
-        return { conversation: '' };
+        return undefined;
       }
     });
 
@@ -368,16 +384,18 @@ async function startWhatsAppBot() {
                 sock.sendMessage(replyJid, { text: data.reply }),
                 new Promise((_, reject) => setTimeout(() => reject(new Error('Send timeout (8s)')), 8000))
               ]);
-              if (sent?.key?.id && sent?.message) storeSentMessage(sent.key.id, sent.message);
+              if (sent?.key?.id) storeSentMessage(sent.key.id, sent.message || { conversation: data.reply });
               logEvent('✅', `Delivered reply to ${replyJid}`);
             } catch (sendErr) {
               logEvent('⚠️', `Direct send failed (${sendErr.message}), trying fallback`);
               try {
                 if (replyJid !== rawJid) {
-                  await sock.sendMessage(rawJid, { text: data.reply });
+                  const fallbackSent = await sock.sendMessage(rawJid, { text: data.reply });
+                  if (fallbackSent?.key?.id) storeSentMessage(fallbackSent.key.id, fallbackSent.message || { conversation: data.reply });
                   logEvent('✅', `Delivered reply via fallback to ${rawJid}`);
                 } else if (cleanPhone) {
-                  await sock.sendMessage(formatJid(cleanPhone), { text: data.reply });
+                  const fallbackSent = await sock.sendMessage(formatJid(cleanPhone), { text: data.reply });
+                  if (fallbackSent?.key?.id) storeSentMessage(fallbackSent.key.id, fallbackSent.message || { conversation: data.reply });
                   logEvent('✅', `Delivered reply via fallback to ${cleanPhone}`);
                 }
               } catch (e2) {
@@ -622,7 +640,7 @@ app.post('/send', async (req, res) => {
   try {
     const jid = (typeof phone === 'string' && phone.includes('@')) ? phone : formatJid(phone);
     const sent = await sock.sendMessage(jid, { text: message });
-    if (sent?.key?.id && sent?.message) storeSentMessage(sent.key.id, sent.message);
+    if (sent?.key?.id) storeSentMessage(sent.key.id, sent.message || { conversation: message });
     logEvent('📤', `Single message delivered to ${phone}`);
     res.json({ status: 'success', message: 'Message sent successfully.' });
   } catch (err) {
@@ -653,7 +671,8 @@ app.post('/broadcast', async (req, res) => {
       if (!item.phone || !item.message) continue;
       try {
         const jid = formatJid(item.phone);
-        await sock.sendMessage(jid, { text: item.message });
+        const sent = await sock.sendMessage(jid, { text: item.message });
+        if (sent?.key?.id) storeSentMessage(sent.key.id, sent.message || { conversation: item.message });
         logEvent('✅', `[${i + 1}/${messages.length}] Broadcast sent to ${item.phone}`);
 
         // 5 to 6.5 seconds human-like delay between messages to prevent WhatsApp anti-spam ban
